@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+
+from measure import Measure, ST_FAILED
+
+import sys
+import os
+import time
+import subprocess
+
+from threading import Timer
+
+DESC = "Hey load driver for Opsani Optune"
+VERSION = "0.0.1"
+HAS_CANCEL = False
+PROGRESS_INTERVAL = 30
+
+DFLT_LOAD_CFG = {
+    'n_clients': 30,        # Number of simultaneous threads
+    'n_requests': 10000000,   # request limit
+    't_limit': 180            # time limit in seconds
+}
+
+METRICS = {}
+
+class Hey(Measure):
+    # def __init__(self, version, cli_desc, supports_cancel, progress_interval):
+    #     super().__init__(version, cli_desc, supports_cancel, progress_interval)
+
+    # overwrites super
+    def describe(self):
+        return METRICS
+
+    # overwrites super
+    def handle_cancel(self, signal, frame):
+        err = "Exiting due to signal: %s"%signal
+        self.print_measure_error(err, ST_FAILED)
+        try:
+            self.proc.terminate()
+        except:
+            pass
+        sys.exit(3)
+
+    # overwrites super
+    def measure(self):
+        load_cfg = DFLT_LOAD_CFG.copy()
+        try:
+            load = self.input_data.get('control', {}).get('load', {})
+        except:
+            raise Exception('Invalid control configuration format in input')
+
+        # update the config dictionary with the test URL
+        load_cfg['test_url'] = 'http://' + os.environ.get('HEY_TEST_URL', '')
+        load_cfg['host'] = os.environ.get('HEY_TEST_APP', '')
+
+        load_cfg.update(load) # will override test_url and headers if provided in load
+        if not load_cfg['test_url']:
+            raise Exception('Load configuration is missing a test_url')
+
+        result, command = self._run_hey(
+            test_url      = load_cfg['test_url'],
+            test_host     = load_cfg['host'],
+            n_clients     = load_cfg['n_clients'],
+            n_requests    = load_cfg['n_requests'],
+            t_limit       = load_cfg['t_limit']
+            )
+
+        metrics = {}
+
+        annotations = {
+            'command': command,
+        }
+
+        return (metrics, annotations)
+
+
+    # helper:  run apache benchmark measurement
+    def _run_hey(self, test_url, test_host, n_clients, n_requests, t_limit):
+
+        prog_coefficient = 1.0
+        prog_start = 0.0
+
+        # construct and run measurement command
+        cmd = ['hey', '-n', str(n_requests), '-c', str(n_clients), '-z', t_limit if type(t_limit) is str else str(t_limit) + 's', '-m', 'GET']
+        if test_host:
+            cmd.extend(['-host', test_host])
+
+        cmd.extend([test_url])
+
+        self._run_hey_progress(cmd, n_requests, t_limit, prog_start, prog_coefficient)
+
+        result = {}
+
+        command = ' '.join(cmd)
+        return (result, command)
+
+    # helper:  execute apache benchmark command and print progress
+    def _run_hey_progress(self, cmd, n_requests, t_limit, prog_start, prog_coefficient):
+        self.debug("Running test command:", cmd)
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # start progress for time limited hey command: update every 5 seconds -
+        # it is printed by default every 30 seconds
+        if t_limit > 0:
+            t_start = time.time()
+            t = repeatingTimer(5, self._update_timed_progress, t_start, t_limit,
+                               prog_start, prog_coefficient)
+            t.start()
+
+        # use try-and-finally to ensure the timer, if any, is canceled and does
+        # not block driver exit in case of an exception
+        try:
+
+            # process stderr
+            stderr = []
+            with self.proc.stderr:
+                for line in iter(self.proc.stderr.readline, b''):
+                    l = line.decode().strip()
+                    stderr.append(l)
+
+            return_code = self.proc.wait()
+        except Exception as e:
+            raise
+        finally:
+            if t_limit > 0:
+                t.cancel()
+
+        # Never return Error
+        # if return_code != 0:
+        #     self.debug("Command failed. Stderr:\n" + '\n'.join(stderr))
+        #     raise Exception("Failed to measure, Locust failed with exit code: " + str(return_code))
+
+    # helper:  update timer based progress
+    def _update_timed_progress(self, t_start, t_limit, prog_start, prog_coefficient):
+        prog = min(100.0, 100.0 * (time.time() - t_start) / t_limit)
+        self.progress = min(100, int((prog_coefficient * prog) + prog_start))
+
+
+class repeatingTimer():
+    def __init__(self, seconds, func, *args):
+        self.seconds = seconds
+        self.func = func
+        self.args = args
+        self.thread = Timer(self.seconds, self.call_func)
+    def call_func(self):
+        self.func(*self.args)
+        self.thread = Timer(self.seconds, self.call_func)
+        self.thread.start()
+    def start(self):
+        self.thread.start()
+    def cancel(self):
+        self.thread.cancel()
+
+
+if __name__ == '__main__':
+    l = Hey(VERSION, DESC, HAS_CANCEL, PROGRESS_INTERVAL)
+    l.run()
