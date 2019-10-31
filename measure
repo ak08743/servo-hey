@@ -49,7 +49,7 @@ class Hey(Measure):
             raise Exception('Invalid control configuration format in input')
 
         # update the config dictionary with the test URL
-        load_cfg['test_url'] = 'http://' + os.environ.get('HEY_TEST_URL', '')
+        load_cfg['test_url'] = os.environ.get('HEY_TEST_URL', '')
         load_cfg['host'] = os.environ.get('HEY_TEST_APP', '')
 
         load_cfg.update(load) # will override test_url and headers if provided in load
